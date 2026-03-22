@@ -4,15 +4,16 @@ import android.provider.Telephony
 import com.goodwy.smsmessenger.models.Conversation
 import com.goodwy.smsmessenger.models.Message
 
-fun Conversation.toSyncConversation(): SyncConversation =
+fun Conversation.toSyncConversation(
+    muted: Boolean = false,
+): SyncConversation =
     SyncConversation(
         id = threadId.toString(),
         participants = listOfNotNull(phoneNumber.takeIf { it.isNotBlank() }),
         lastMessage = snippet,
         lastUpdatedAtEpochMillis = date.toLong() * 1000L,
         unreadCount = unreadCount,
-        // TODO: map real mute state once the phone model stores it explicitly.
-        muted = false,
+        muted = muted,
     )
 
 fun Message.toSyncMessage(): SyncMessage =
