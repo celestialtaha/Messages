@@ -12,6 +12,7 @@ Shared with `Wessage` Wear app.
 - `/wessage/sync/v1/messages`
 - `/wessage/sync/v1/mutation`
 - `/wessage/sync/v1/ack`
+- `/wessage/sync/v1/bootstrap_request`
 
 ## Payload Types
 

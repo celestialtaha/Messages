@@ -16,7 +16,12 @@ if (keystorePropertiesFile.exists()) {
     keystoreProperties.load(FileInputStream(keystorePropertiesFile))
 }
 val properties = Properties().apply {
-    load(rootProject.file("local.properties").reader())
+    val localPropertiesFile = rootProject.file("local.properties")
+    if (localPropertiesFile.exists()) {
+        load(localPropertiesFile.reader())
+    } else {
+        logger.warn("Warning: local.properties not found, using empty defaults for optional keys.")
+    }
 }
 
 fun hasSigningVars(): Boolean {
@@ -178,4 +183,5 @@ dependencies {
     implementation(libs.bundles.lifecycle)
     implementation(libs.swipe.action)
     implementation(libs.google.services)
+    implementation(libs.play.services.wearable)
 }
