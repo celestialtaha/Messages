@@ -37,6 +37,18 @@ object SyncJsonCodec {
             )
         }.getOrNull()
 
+    fun decodeBootstrapRequest(bytes: ByteArray): BootstrapRequest {
+        if (bytes.isEmpty()) return BootstrapRequest()
+        return runCatching {
+            val json = JSONObject(bytes.toString(Charsets.UTF_8))
+            BootstrapRequest(
+                schemaVersion = json.optInt("schemaVersion", SYNC_SCHEMA_VERSION),
+                limit = json.optInt("limit", 25).coerceAtLeast(1),
+                offset = json.optInt("offset", 0).coerceAtLeast(0),
+            )
+        }.getOrElse { BootstrapRequest() }
+    }
+
     fun encodeMutationAck(ack: MutationAck): ByteArray =
         JSONObject()
             .put("schemaVersion", ack.schemaVersion)

@@ -35,21 +35,34 @@ class PhoneSyncListenerService : WearableListenerService() {
                 val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
                 sendKeyExchangeResponse(messageEvent.sourceNodeId)
                 if (handled) {
-                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                    publishBootstrapSnapshot(
+                        nodeId = messageEvent.sourceNodeId,
+                        limit = DEFAULT_BOOTSTRAP_LIMIT,
+                        offset = 0,
+                    )
                 }
             }
 
             SyncPaths.KEY_EXCHANGE_RESPONSE -> {
                 val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
                 if (handled) {
-                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                    publishBootstrapSnapshot(
+                        nodeId = messageEvent.sourceNodeId,
+                        limit = DEFAULT_BOOTSTRAP_LIMIT,
+                        offset = 0,
+                    )
                 }
             }
 
             SyncPaths.BOOTSTRAP_REQUEST -> {
+                val request = SyncJsonCodec.decodeBootstrapRequest(messageEvent.data)
                 sendKeyExchangeResponse(messageEvent.sourceNodeId)
                 if (secureCodec.hasPeerKey(messageEvent.sourceNodeId)) {
-                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                    publishBootstrapSnapshot(
+                        nodeId = messageEvent.sourceNodeId,
+                        limit = request.limit.coerceAtMost(MAX_BOOTSTRAP_LIMIT),
+                        offset = request.offset,
+                    )
                 } else {
                     sendKeyExchangeRequest(messageEvent.sourceNodeId)
                 }
@@ -83,20 +96,31 @@ class PhoneSyncListenerService : WearableListenerService() {
                     ack = ack,
                 )
                 if (ack.accepted) {
-                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                    publishBootstrapSnapshot(
+                        nodeId = messageEvent.sourceNodeId,
+                        limit = DEFAULT_BOOTSTRAP_LIMIT,
+                        offset = 0,
+                    )
                 }
             }
         }
     }
 
-    private fun publishBootstrapSnapshot(nodeId: String) {
+    private fun publishBootstrapSnapshot(
+        nodeId: String,
+        limit: Int,
+        offset: Int,
+    ) {
         val now = System.currentTimeMillis()
         val mutedThreads = config.customNotifications
+        val safeLimit = limit.coerceIn(1, MAX_BOOTSTRAP_LIMIT)
+        val safeOffset = offset.coerceAtLeast(0)
         val conversations =
             conversationsDB
                 .getNonArchived()
                 .sortedByDescending { it.date }
-                .take(MAX_CONVERSATIONS)
+                .drop(safeOffset)
+                .take(safeLimit)
         val conversationIds = conversations.map { it.threadId }
 
         val messages =
@@ -128,7 +152,7 @@ class PhoneSyncListenerService : WearableListenerService() {
                 messages = messages.map { it.toSyncMessage() },
             )
         )
-        Log.d(TAG, "Published bootstrap snapshot")
+        Log.d(TAG, "Published bootstrap snapshot conversations=${conversations.size} limit=$safeLimit offset=$safeOffset")
     }
 
     private fun handleMutation(mutation: WatchMutation): MutationAck =
@@ -249,7 +273,8 @@ class PhoneSyncListenerService : WearableListenerService() {
 
     private companion object {
         private const val TAG = "PhoneSyncListener"
-        private const val MAX_CONVERSATIONS = 25
+        private const val DEFAULT_BOOTSTRAP_LIMIT = 25
+        private const val MAX_BOOTSTRAP_LIMIT = 300
         private const val MAX_MESSAGES_PER_CONVERSATION = 30
     }
 }

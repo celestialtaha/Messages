@@ -22,11 +22,13 @@ Shared with `Wessage` Wear app.
 - `MessageDeltaBatch`
 - `WatchMutation`
 - `MutationAck`
+- `BootstrapRequest` (`limit`, `offset`)
 
 ## Notes
 
 - Phone remains authoritative.
 - Watch actions must include `clientMutationId`.
+- Watch may request paged bootstrap via `BootstrapRequest`.
 - Every payload carries `schemaVersion`.
 - Key exchange payloads carry the sender P-256 public key.
 - Sync payloads on `conversations`, `messages`, `mutation`, and `ack` are AES-256-GCM envelopes derived from ECDH.
