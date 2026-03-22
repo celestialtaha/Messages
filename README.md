@@ -1,25 +1,61 @@
-<div align="center">
+# Messages (Phone App)
 
-<img src="app/src/main/res/drawable/ic_launcher.png" width="120" alt="App icon"/>  
-<img src="app/src/gplay/res/drawable/ic_launcher.png" width="120" alt="App icon"/>
+Messages is the phone app in this project and the sync source for the Wear OS companion (`Wessage`).
 
-# Right Messages/AlRight Messages
-<a href='https://play.google.com/store/apps/details?id=com.goodwy.smsmessenger'><img alt='Get it on Google Play' src='https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png' height=80/></a>  <a href='https://play.google.com/store/apps/details?id=dev.goodwy.messages'><img alt='Get it on Google Play' src='https://play.google.com/intl/en_us/badges/static/images/badges/en_badge_web_generic.png' height=80/></a>
-</div>
+Built for daily use:
 
-The ultimate SMS app that lets you personalize every aspect of your messaging experience. With Right Messages,
-you can easily customize the interface to suit your preferences and streamline your messaging experience.
-Our app allows you to quickly copy service codes and phone numbers from messages with just a few taps, saving you
-time and hassle. <br><br>
+- clean and familiar messaging UI
+- reliable local sync to watch
+- privacy-first operation with no extra cloud account
 
-## ☕ Support the Project
+## For Most Users
 
-If you find **Right Messages/AlRight Messages** useful and would like to support its development, consider
-buying me a coffee! Your support helps me maintain and improve this project.
+Get the latest APK from Releases:
 
-[![Buy Me A Coffee](https://img.shields.io/badge/Buy%20Me%20A%20Coffee-FFDD00?style=for-the-badge&logo=buy-me-a-coffee&logoColor=black)](https://www.buymeacoffee.com/goodwy)
+- https://github.com/celestialtaha/Messages/releases
 
-*Every contribution, no matter how small, helps keep this project alive and growing! ❤️*<br><br><br>
+Install on your phone, grant SMS/contacts/notifications permissions, and open the app once before opening the watch app.
 
+## Pairing With Wessage (Watch)
 
-*Based on [Simple SMS Messenger](https://github.com/SimpleMobileTools/Simple-SMS-Messenger), [Fossify Messages](https://github.com/FossifyOrg/Messages).*
+1. Install this app on phone.
+2. Install `Wessage` on your Wear OS watch:
+   - https://github.com/celestialtaha/Wessage/releases
+3. Make sure phone and watch are paired and Bluetooth is on.
+4. Open phone app, then open watch app.
+5. Messages should appear on watch after initial sync.
+
+## Privacy
+
+- Core sync is phone <-> watch (Wear OS data layer).
+- No dedicated backend account is required.
+- Internet is not required for normal nearby sync after pairing.
+
+## Troubleshooting
+
+- Watch shows no threads:
+  - Open both apps once.
+  - Verify watch pairing in Wear OS app.
+  - Keep Bluetooth enabled.
+- Delayed first load:
+  - Initial sync can take longer than incremental updates.
+
+## Release Process (Maintainers)
+
+1. Update version in `gradle.properties` (`VERSION_NAME`, `VERSION_CODE`).
+2. Build release APK(s).
+3. Tag and push:
+
+```bash
+git tag v8.2.2
+git push origin v8.2.2
+```
+
+4. Publish a GitHub Release and attach APK artifacts.
+
+## Credits
+
+Based on:
+
+- https://github.com/SimpleMobileTools/Simple-SMS-Messenger
+- https://github.com/FossifyOrg/Messages
