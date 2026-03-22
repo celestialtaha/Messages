@@ -19,6 +19,23 @@ interface ConversationsDao {
         return getNonArchivedWithLatestSnippet().map { it.toConversation() }
     }
 
+    @Query(
+        "SELECT (SELECT body FROM messages LEFT OUTER JOIN recycle_bin_messages ON messages.id = recycle_bin_messages.id " +
+            "WHERE recycle_bin_messages.id IS NULL AND messages.thread_id = conversations.thread_id ORDER BY messages.date DESC LIMIT 1) as new_snippet, * " +
+            "FROM conversations WHERE archived = 0 and deleted = 0 ORDER BY conversations.date DESC LIMIT :limit OFFSET :offset"
+    )
+    fun getNonArchivedPagedWithLatestSnippet(
+        limit: Int,
+        offset: Int,
+    ): List<ConversationWithSnippetOverride>
+
+    fun getNonArchivedPaged(
+        limit: Int,
+        offset: Int,
+    ): List<Conversation> {
+        return getNonArchivedPagedWithLatestSnippet(limit = limit, offset = offset).map { it.toConversation() }
+    }
+
     @Query("SELECT (SELECT body FROM messages LEFT OUTER JOIN recycle_bin_messages ON messages.id = recycle_bin_messages.id WHERE recycle_bin_messages.id IS NULL AND messages.thread_id = conversations.thread_id ORDER BY messages.date DESC LIMIT 1) as new_snippet, * FROM conversations WHERE archived = 1")
     fun getAllArchivedWithLatestSnippet(): List<ConversationWithSnippetOverride>
 

@@ -117,10 +117,10 @@ class PhoneSyncListenerService : WearableListenerService() {
         val safeOffset = offset.coerceAtLeast(0)
         val conversations =
             conversationsDB
-                .getNonArchived()
-                .sortedByDescending { it.date }
-                .drop(safeOffset)
-                .take(safeLimit)
+                .getNonArchivedPaged(
+                    limit = safeLimit,
+                    offset = safeOffset,
+                )
         val conversationIds = conversations.map { it.threadId }
 
         val messages =
