@@ -13,6 +13,8 @@ Shared with `Wessage` Wear app.
 - `/wessage/sync/v1/mutation`
 - `/wessage/sync/v1/ack`
 - `/wessage/sync/v1/bootstrap_request`
+- `/wessage/sync/v1/key_exchange/request`
+- `/wessage/sync/v1/key_exchange/response`
 
 ## Payload Types
 
@@ -26,3 +28,6 @@ Shared with `Wessage` Wear app.
 - Phone remains authoritative.
 - Watch actions must include `clientMutationId`.
 - Every payload carries `schemaVersion`.
+- Key exchange payloads carry the sender P-256 public key.
+- Sync payloads on `conversations`, `messages`, `mutation`, and `ack` are AES-256-GCM envelopes derived from ECDH.
+- Encrypted envelopes include counters and must be replay-protected.

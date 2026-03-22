@@ -8,25 +8,51 @@ import com.goodwy.smsmessenger.sync.contract.ConversationDeltaBatch
 import com.goodwy.smsmessenger.sync.contract.MessageDeltaBatch
 import com.goodwy.smsmessenger.sync.contract.SyncJsonCodec
 import com.goodwy.smsmessenger.sync.contract.SyncPaths
+import com.goodwy.smsmessenger.sync.security.SecureSyncCodec
 
 class PhoneSyncPublisher(
     context: Context,
 ) {
     private val appContext = context.applicationContext
     private val dataClient by lazy { Wearable.getDataClient(appContext) }
+    private val secureCodec by lazy { SecureSyncCodec(appContext) }
 
-    fun publishConversations(batch: ConversationDeltaBatch) {
-        putPayload(path = SyncPaths.CONVERSATIONS, payload = SyncJsonCodec.encodeConversationDeltaBatch(batch))
+    fun publishConversations(
+        nodeId: String,
+        batch: ConversationDeltaBatch,
+    ) {
+        putPayload(
+            nodeId = nodeId,
+            path = SyncPaths.CONVERSATIONS,
+            plainPayload = SyncJsonCodec.encodeConversationDeltaBatch(batch),
+        )
     }
 
-    fun publishMessages(batch: MessageDeltaBatch) {
-        putPayload(path = SyncPaths.MESSAGES, payload = SyncJsonCodec.encodeMessageDeltaBatch(batch))
+    fun publishMessages(
+        nodeId: String,
+        batch: MessageDeltaBatch,
+    ) {
+        putPayload(
+            nodeId = nodeId,
+            path = SyncPaths.MESSAGES,
+            plainPayload = SyncJsonCodec.encodeMessageDeltaBatch(batch),
+        )
     }
 
     private fun putPayload(
+        nodeId: String,
         path: String,
-        payload: ByteArray,
+        plainPayload: ByteArray,
     ) {
+        val payload =
+            secureCodec.encrypt(
+                nodeId = nodeId,
+                path = path,
+                plainPayload = plainPayload,
+            ) ?: run {
+                Log.d(TAG, "Skipping publish until key exchange completes path=$path")
+                return
+            }
         val request =
             PutDataMapRequest.create(path).run {
                 dataMap.putByteArray(PAYLOAD_KEY, payload)

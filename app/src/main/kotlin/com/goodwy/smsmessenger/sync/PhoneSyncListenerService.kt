@@ -22,18 +22,47 @@ import com.goodwy.smsmessenger.sync.contract.WatchMutation
 import com.goodwy.smsmessenger.sync.contract.WatchMutationType
 import com.goodwy.smsmessenger.sync.contract.toSyncConversation
 import com.goodwy.smsmessenger.sync.contract.toSyncMessage
+import com.goodwy.smsmessenger.sync.security.SecureSyncCodec
 
 class PhoneSyncListenerService : WearableListenerService() {
     private val publisher by lazy { PhoneSyncPublisher(this) }
+    private val secureCodec by lazy { SecureSyncCodec(this) }
+    private val messageClient by lazy { Wearable.getMessageClient(this) }
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
         when (messageEvent.path) {
+            SyncPaths.KEY_EXCHANGE_REQUEST -> {
+                val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
+                sendKeyExchangeResponse(messageEvent.sourceNodeId)
+                if (handled) {
+                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                }
+            }
+
+            SyncPaths.KEY_EXCHANGE_RESPONSE -> {
+                val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
+                if (handled) {
+                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                }
+            }
+
             SyncPaths.BOOTSTRAP_REQUEST -> {
-                publishBootstrapSnapshot()
+                sendKeyExchangeResponse(messageEvent.sourceNodeId)
+                if (secureCodec.hasPeerKey(messageEvent.sourceNodeId)) {
+                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
+                } else {
+                    sendKeyExchangeRequest(messageEvent.sourceNodeId)
+                }
             }
 
             SyncPaths.MUTATION -> {
-                val mutation = SyncJsonCodec.decodeWatchMutation(messageEvent.data)
+                val plainPayload =
+                    secureCodec.decrypt(
+                        sourceNodeId = messageEvent.sourceNodeId,
+                        path = messageEvent.path,
+                        envelopePayload = messageEvent.data,
+                    ) ?: messageEvent.data
+                val mutation = SyncJsonCodec.decodeWatchMutation(plainPayload)
                 if (mutation == null) {
                     sendAck(
                         nodeId = messageEvent.sourceNodeId,
@@ -54,13 +83,13 @@ class PhoneSyncListenerService : WearableListenerService() {
                     ack = ack,
                 )
                 if (ack.accepted) {
-                    publishBootstrapSnapshot()
+                    publishBootstrapSnapshot(messageEvent.sourceNodeId)
                 }
             }
         }
     }
 
-    private fun publishBootstrapSnapshot() {
+    private fun publishBootstrapSnapshot(nodeId: String) {
         val now = System.currentTimeMillis()
         val mutedThreads = config.customNotifications
         val conversations =
@@ -79,7 +108,8 @@ class PhoneSyncListenerService : WearableListenerService() {
             }
 
         publisher.publishConversations(
-            ConversationDeltaBatch(
+            nodeId = nodeId,
+            batch = ConversationDeltaBatch(
                 cursor = now,
                 generatedAtEpochMillis = now,
                 conversations =
@@ -91,7 +121,8 @@ class PhoneSyncListenerService : WearableListenerService() {
             )
         )
         publisher.publishMessages(
-            MessageDeltaBatch(
+            nodeId = nodeId,
+            batch = MessageDeltaBatch(
                 cursor = now,
                 generatedAtEpochMillis = now,
                 messages = messages.map { it.toSyncMessage() },
@@ -176,10 +207,43 @@ class PhoneSyncListenerService : WearableListenerService() {
         nodeId: String,
         ack: MutationAck,
     ) {
-        Wearable.getMessageClient(this)
-            .sendMessage(nodeId, SyncPaths.ACK, SyncJsonCodec.encodeMutationAck(ack))
+        val plainPayload = SyncJsonCodec.encodeMutationAck(ack)
+        val payload =
+            secureCodec.encrypt(
+                nodeId = nodeId,
+                path = SyncPaths.ACK,
+                plainPayload = plainPayload,
+            ) ?: run {
+                sendKeyExchangeResponse(nodeId)
+                Log.d(TAG, "Skipping ack until key exchange completes")
+                return
+            }
+        messageClient
+            .sendMessage(nodeId, SyncPaths.ACK, payload)
             .addOnFailureListener { error ->
                 Log.w(TAG, "Failed sending mutation ack", error)
+            }
+    }
+
+    private fun sendKeyExchangeRequest(nodeId: String) {
+        messageClient
+            .sendMessage(
+                nodeId,
+                SyncPaths.KEY_EXCHANGE_REQUEST,
+                secureCodec.createKeyExchangePayload(),
+            ).addOnFailureListener { error ->
+                Log.w(TAG, "Failed sending key exchange request", error)
+            }
+    }
+
+    private fun sendKeyExchangeResponse(nodeId: String) {
+        messageClient
+            .sendMessage(
+                nodeId,
+                SyncPaths.KEY_EXCHANGE_RESPONSE,
+                secureCodec.createKeyExchangePayload(),
+            ).addOnFailureListener { error ->
+                Log.w(TAG, "Failed sending key exchange response", error)
             }
     }
 
