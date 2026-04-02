@@ -38,6 +38,7 @@ data class SyncMessage(
     val timestampEpochMillis: Long,
     val status: SyncMessageStatus,
     val localVersion: Int,
+    val outgoing: Boolean = false,
 )
 
 data class ConversationDeltaBatch(

@@ -77,6 +77,7 @@ object SyncJsonCodec {
             .put("timestampEpochMillis", timestampEpochMillis)
             .put("status", status.name)
             .put("localVersion", localVersion)
+            .put("outgoing", outgoing)
 
     private fun <T> List<T>.toJsonArray(transform: (T) -> JSONObject): JSONArray =
         JSONArray().also { array -> forEach { array.put(transform(it)) } }

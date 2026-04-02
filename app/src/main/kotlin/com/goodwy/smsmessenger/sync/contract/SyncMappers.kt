@@ -20,12 +20,18 @@ fun Message.toSyncMessage(): SyncMessage =
     SyncMessage(
         id = id.toString(),
         conversationId = threadId.toString(),
-        senderId = senderPhoneNumber.ifBlank { "self" },
+        senderId =
+            if (isReceivedMessage()) {
+                senderPhoneNumber.ifBlank { "unknown" }
+            } else {
+                "self"
+            },
         body = body,
         timestampEpochMillis = date.toLong() * 1000L,
         status = toSyncStatus(),
         // Local version increments can be replaced by a dedicated mutation version later.
         localVersion = date,
+        outgoing = !isReceivedMessage(),
     )
 
 fun Message.toSyncStatus(): SyncMessageStatus {
