@@ -1,8 +1,11 @@
 package com.goodwy.smsmessenger.sync
 
+import android.Manifest
 import android.app.NotificationChannel
 import android.app.NotificationManager
+import android.content.pm.PackageManager
 import android.util.Log
+import androidx.core.content.ContextCompat
 import com.google.android.gms.wearable.MessageEvent
 import com.google.android.gms.wearable.Wearable
 import com.google.android.gms.wearable.WearableListenerService
@@ -124,11 +127,14 @@ class PhoneSyncListenerService : WearableListenerService() {
         val mutedThreads = config.customNotifications
         val safeLimit = limit.coerceIn(1, MAX_BOOTSTRAP_LIMIT)
         val safeOffset = offset.coerceAtLeast(0)
-        val snapshot =
-            loadSnapshotFromTelephony(
+        val localSnapshot =
+            loadSnapshotFromLocalDatabase(
                 limit = safeLimit,
                 offset = safeOffset,
-            ) ?: loadSnapshotFromLocalDatabase(
+            )
+        val snapshot =
+            chooseBootstrapSnapshot(
+                localSnapshot = localSnapshot,
                 limit = safeLimit,
                 offset = safeOffset,
             )
@@ -159,9 +165,82 @@ class PhoneSyncListenerService : WearableListenerService() {
         )
         Log.d(
             TAG,
-            "Published bootstrap snapshot conversations=${conversations.size} messages=${messages.size} limit=$safeLimit offset=$safeOffset",
+            "Published bootstrap snapshot source=${snapshot.source} conversations=${conversations.size} messages=${messages.size} limit=$safeLimit offset=$safeOffset",
         )
     }
+
+    private fun chooseBootstrapSnapshot(
+        localSnapshot: SyncSnapshotPayload,
+        limit: Int,
+        offset: Int,
+    ): SyncSnapshotPayload {
+        if (!hasReadSmsPermission()) {
+            Log.w(TAG, "Using local DB snapshot: READ_SMS not granted")
+            return localSnapshot.copy(source = "local_db_no_sms_permission")
+        }
+
+        val telephonySnapshot =
+            loadSnapshotFromTelephony(
+                limit = limit,
+                offset = offset,
+            )
+        if (telephonySnapshot == null) {
+            Log.w(
+                TAG,
+                "Using local DB snapshot: telephony snapshot unavailable limit=$limit offset=$offset",
+            )
+            return localSnapshot
+        }
+
+        if (offset > 0) {
+            return when {
+                telephonySnapshot.conversations.isNotEmpty() -> telephonySnapshot
+                localSnapshot.conversations.isNotEmpty() -> {
+                    Log.w(
+                        TAG,
+                        "Using local DB paged snapshot: telephony page empty limit=$limit offset=$offset",
+                    )
+                    localSnapshot.copy(source = "local_db_paged_fallback")
+                }
+                else -> telephonySnapshot
+            }
+        }
+
+        val telephonyEmpty = !telephonySnapshot.hasContent()
+        if (!telephonyEmpty) {
+            return telephonySnapshot
+        }
+
+        if (localSnapshot.hasContent()) {
+            Log.w(
+                TAG,
+                "Using local DB snapshot: telephony returned empty bootstrap while local DB has data",
+            )
+            return localSnapshot.copy(source = "local_db_empty_bootstrap_fallback")
+        }
+
+        val telephonyRetry =
+            loadSnapshotFromTelephony(
+                limit = limit,
+                offset = offset,
+            )
+        if (telephonyRetry != null && telephonyRetry.hasContent()) {
+            Log.w(TAG, "Using telephony snapshot retry after initial empty bootstrap")
+            return telephonyRetry.copy(source = "telephony_retry")
+        }
+
+        Log.w(
+            TAG,
+            "Using local DB snapshot: telephony bootstrap remained empty after retry",
+        )
+        return localSnapshot.copy(source = "local_db_empty_after_retry")
+    }
+
+    private fun hasReadSmsPermission(): Boolean =
+        ContextCompat.checkSelfPermission(
+            this,
+            Manifest.permission.READ_SMS,
+        ) == PackageManager.PERMISSION_GRANTED
 
     private fun loadSnapshotFromTelephony(
         limit: Int,
@@ -179,13 +258,20 @@ class PhoneSyncListenerService : WearableListenerService() {
                     .drop(offset)
                     .take(limit)
                     .toList()
+            val telephonyMessages =
+                conversationsPage
+                    .flatMap { conversation ->
+                        getMessages(
+                            threadId = conversation.threadId,
+                            includeScheduledMessages = false,
+                            limit = MAX_MESSAGES_PER_CONVERSATION,
+                        )
+                    }
             val threadMessages =
-                conversationsPage.flatMap { conversation ->
-                    getMessages(
-                        threadId = conversation.threadId,
-                        includeScheduledMessages = false,
-                        limit = MAX_MESSAGES_PER_CONVERSATION,
-                    )
+                if (telephonyMessages.isEmpty() && conversationsPage.isNotEmpty()) {
+                    loadMessagesFromLocalDatabase(conversationsPage)
+                } else {
+                    telephonyMessages
                 }
             val deletedConversationIds =
                 conversationsDB
@@ -204,6 +290,7 @@ class PhoneSyncListenerService : WearableListenerService() {
                 conversations = conversationsPage,
                 messages = threadMessages,
                 deletedConversationIds = deletedConversationIds,
+                source = "telephony",
             )
         }.onFailure { error ->
             Log.w(TAG, "Telephony snapshot read failed. Falling back to local DB", error)
@@ -230,8 +317,19 @@ class PhoneSyncListenerService : WearableListenerService() {
             conversations = conversationsPage,
             messages = threadMessages,
             deletedConversationIds = emptyList(),
+            source = "local_db",
         )
     }
+
+    private fun loadMessagesFromLocalDatabase(
+        conversations: List<Conversation>,
+    ): List<Message> =
+        conversations.flatMap { conversation ->
+            messagesDB
+                .getNonRecycledThreadMessages(conversation.threadId)
+                .sortedByDescending { message -> message.date }
+                .take(MAX_MESSAGES_PER_CONVERSATION)
+        }
 
     private fun handleMutation(mutation: WatchMutation): MutationAck =
         runCatching {
@@ -362,4 +460,8 @@ private data class SyncSnapshotPayload(
     val conversations: List<Conversation>,
     val messages: List<Message>,
     val deletedConversationIds: List<String>,
+    val source: String,
 )
+
+private fun SyncSnapshotPayload.hasContent(): Boolean =
+    conversations.isNotEmpty() || messages.isNotEmpty()
