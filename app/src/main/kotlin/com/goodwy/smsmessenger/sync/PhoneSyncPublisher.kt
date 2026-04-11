@@ -44,6 +44,9 @@ class PhoneSyncPublisher(
         path: String,
         plainPayload: ByteArray,
     ) {
+        if (plainPayload.size > PAYLOAD_WARN_BYTES) {
+            Log.w(TAG, "Large sync payload path=$path bytes=${plainPayload.size}")
+        }
         val payload =
             secureCodec.encrypt(
                 nodeId = nodeId,
@@ -70,5 +73,6 @@ class PhoneSyncPublisher(
         private const val TAG = "PhoneSyncPublisher"
         private const val PAYLOAD_KEY = "payload"
         private const val UPDATED_AT_KEY = "updated_at"
+        private const val PAYLOAD_WARN_BYTES = 80_000
     }
 }

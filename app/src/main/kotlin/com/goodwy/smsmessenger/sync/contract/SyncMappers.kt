@@ -18,7 +18,7 @@ fun Conversation.toSyncConversation(
 
 fun Message.toSyncMessage(): SyncMessage =
     SyncMessage(
-        id = id.toString(),
+        id = if (isMMS) "mms:$id" else "sms:$id",
         conversationId = threadId.toString(),
         senderId =
             if (isReceivedMessage()) {

@@ -8,11 +8,16 @@ import com.google.android.gms.wearable.Wearable
 import com.google.android.gms.wearable.WearableListenerService
 import com.goodwy.smsmessenger.extensions.config
 import com.goodwy.smsmessenger.extensions.conversationsDB
+import com.goodwy.smsmessenger.extensions.getConversations
+import com.goodwy.smsmessenger.extensions.getMessages
 import com.goodwy.smsmessenger.extensions.markThreadMessagesRead
 import com.goodwy.smsmessenger.extensions.messagesDB
 import com.goodwy.smsmessenger.extensions.updateConversationArchivedStatus
 import com.goodwy.smsmessenger.messaging.MessagingUtils.Companion.ADDRESS_SEPARATOR
 import com.goodwy.smsmessenger.messaging.sendMessageCompat
+import com.goodwy.smsmessenger.models.Conversation
+import com.goodwy.smsmessenger.models.Message
+import com.goodwy.smsmessenger.sync.contract.BootstrapRequest
 import com.goodwy.smsmessenger.sync.contract.ConversationDeltaBatch
 import com.goodwy.smsmessenger.sync.contract.MessageDeltaBatch
 import com.goodwy.smsmessenger.sync.contract.MutationAck
@@ -28,6 +33,7 @@ class PhoneSyncListenerService : WearableListenerService() {
     private val publisher by lazy { PhoneSyncPublisher(this) }
     private val secureCodec by lazy { SecureSyncCodec(this) }
     private val messageClient by lazy { Wearable.getMessageClient(this) }
+    private val pendingBootstrapRequests = mutableMapOf<String, BootstrapRequest>()
 
     override fun onMessageReceived(messageEvent: MessageEvent) {
         when (messageEvent.path) {
@@ -35,34 +41,28 @@ class PhoneSyncListenerService : WearableListenerService() {
                 val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
                 sendKeyExchangeResponse(messageEvent.sourceNodeId)
                 if (handled) {
-                    publishBootstrapSnapshot(
-                        nodeId = messageEvent.sourceNodeId,
-                        limit = DEFAULT_BOOTSTRAP_LIMIT,
-                        offset = 0,
-                    )
+                    publishPendingOrDefaultBootstrap(messageEvent.sourceNodeId)
                 }
             }
 
             SyncPaths.KEY_EXCHANGE_RESPONSE -> {
                 val handled = secureCodec.handleKeyExchangePayload(messageEvent.sourceNodeId, messageEvent.data)
                 if (handled) {
-                    publishBootstrapSnapshot(
-                        nodeId = messageEvent.sourceNodeId,
-                        limit = DEFAULT_BOOTSTRAP_LIMIT,
-                        offset = 0,
-                    )
+                    publishPendingOrDefaultBootstrap(messageEvent.sourceNodeId)
                 }
             }
 
             SyncPaths.BOOTSTRAP_REQUEST -> {
                 val request = SyncJsonCodec.decodeBootstrapRequest(messageEvent.data)
+                pendingBootstrapRequests[messageEvent.sourceNodeId] = request
                 sendKeyExchangeResponse(messageEvent.sourceNodeId)
                 if (secureCodec.hasPeerKey(messageEvent.sourceNodeId)) {
                     publishBootstrapSnapshot(
                         nodeId = messageEvent.sourceNodeId,
-                        limit = request.limit.coerceAtMost(MAX_BOOTSTRAP_LIMIT),
+                        limit = request.limit,
                         offset = request.offset,
                     )
+                    pendingBootstrapRequests.remove(messageEvent.sourceNodeId)
                 } else {
                     sendKeyExchangeRequest(messageEvent.sourceNodeId)
                 }
@@ -106,6 +106,15 @@ class PhoneSyncListenerService : WearableListenerService() {
         }
     }
 
+    private fun publishPendingOrDefaultBootstrap(nodeId: String) {
+        val request = pendingBootstrapRequests.remove(nodeId) ?: BootstrapRequest()
+        publishBootstrapSnapshot(
+            nodeId = nodeId,
+            limit = request.limit,
+            offset = request.offset,
+        )
+    }
+
     private fun publishBootstrapSnapshot(
         nodeId: String,
         limit: Int,
@@ -115,21 +124,16 @@ class PhoneSyncListenerService : WearableListenerService() {
         val mutedThreads = config.customNotifications
         val safeLimit = limit.coerceIn(1, MAX_BOOTSTRAP_LIMIT)
         val safeOffset = offset.coerceAtLeast(0)
-        val conversations =
-            conversationsDB
-                .getNonArchivedPaged(
-                    limit = safeLimit,
-                    offset = safeOffset,
-                )
-        val conversationIds = conversations.map { it.threadId }
-
-        val messages =
-            conversationIds.flatMap { threadId ->
-                messagesDB
-                    .getNonRecycledThreadMessages(threadId)
-                    .sortedByDescending { it.date }
-                    .take(MAX_MESSAGES_PER_CONVERSATION)
-            }
+        val snapshot =
+            loadSnapshotFromTelephony(
+                limit = safeLimit,
+                offset = safeOffset,
+            ) ?: loadSnapshotFromLocalDatabase(
+                limit = safeLimit,
+                offset = safeOffset,
+            )
+        val conversations = snapshot.conversations
+        val messages = snapshot.messages
 
         publisher.publishConversations(
             nodeId = nodeId,
@@ -142,6 +146,7 @@ class PhoneSyncListenerService : WearableListenerService() {
                             muted = mutedThreads.contains(conversation.threadId.toString()),
                         )
                     },
+                deletedConversationIds = snapshot.deletedConversationIds,
             )
         )
         publisher.publishMessages(
@@ -152,7 +157,80 @@ class PhoneSyncListenerService : WearableListenerService() {
                 messages = messages.map { it.toSyncMessage() },
             )
         )
-        Log.d(TAG, "Published bootstrap snapshot conversations=${conversations.size} limit=$safeLimit offset=$safeOffset")
+        Log.d(
+            TAG,
+            "Published bootstrap snapshot conversations=${conversations.size} messages=${messages.size} limit=$safeLimit offset=$safeOffset",
+        )
+    }
+
+    private fun loadSnapshotFromTelephony(
+        limit: Int,
+        offset: Int,
+    ): SyncSnapshotPayload? =
+        runCatching {
+            val allLiveConversations =
+                getConversations()
+                    .asSequence()
+                    .filterNot { conversation -> conversation.isArchived }
+                    .toList()
+            val conversationsPage =
+                allLiveConversations
+                    .asSequence()
+                    .drop(offset)
+                    .take(limit)
+                    .toList()
+            val threadMessages =
+                conversationsPage.flatMap { conversation ->
+                    getMessages(
+                        threadId = conversation.threadId,
+                        includeScheduledMessages = false,
+                        limit = MAX_MESSAGES_PER_CONVERSATION,
+                    )
+                }
+            val deletedConversationIds =
+                conversationsDB
+                    .getNonArchived()
+                    .asSequence()
+                    .map { conversation -> conversation.threadId.toString() }
+                    .toSet()
+                    .minus(
+                        allLiveConversations
+                            .asSequence()
+                            .map { conversation -> conversation.threadId.toString() }
+                            .toSet(),
+                    )
+                    .toList()
+            SyncSnapshotPayload(
+                conversations = conversationsPage,
+                messages = threadMessages,
+                deletedConversationIds = deletedConversationIds,
+            )
+        }.onFailure { error ->
+            Log.w(TAG, "Telephony snapshot read failed. Falling back to local DB", error)
+        }.getOrNull()
+
+    private fun loadSnapshotFromLocalDatabase(
+        limit: Int,
+        offset: Int,
+    ): SyncSnapshotPayload {
+        val conversationsPage =
+            conversationsDB
+                .getNonArchivedPaged(
+                    limit = limit,
+                    offset = offset,
+                )
+        val threadMessages =
+            conversationsPage.flatMap { conversation ->
+                messagesDB
+                    .getNonRecycledThreadMessages(conversation.threadId)
+                    .sortedByDescending { message -> message.date }
+                    .take(MAX_MESSAGES_PER_CONVERSATION)
+            }
+        return SyncSnapshotPayload(
+            conversations = conversationsPage,
+            messages = threadMessages,
+            deletedConversationIds = emptyList(),
+        )
     }
 
     private fun handleMutation(mutation: WatchMutation): MutationAck =
@@ -188,6 +266,7 @@ class PhoneSyncListenerService : WearableListenerService() {
         require(messageBody.isNotBlank()) { "empty_body" }
         val conversation =
             conversationsDB.getConversationWithThreadId(threadId)
+                ?: getConversations(threadId = threadId).firstOrNull()
                 ?: error("conversation_not_found")
         val addresses =
             conversation.phoneNumber
@@ -278,3 +357,9 @@ class PhoneSyncListenerService : WearableListenerService() {
         private const val MAX_MESSAGES_PER_CONVERSATION = 30
     }
 }
+
+private data class SyncSnapshotPayload(
+    val conversations: List<Conversation>,
+    val messages: List<Message>,
+    val deletedConversationIds: List<String>,
+)
