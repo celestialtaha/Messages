@@ -5,11 +5,12 @@ import com.goodwy.smsmessenger.models.Conversation
 import com.goodwy.smsmessenger.models.Message
 
 fun Conversation.toSyncConversation(
+    participants: List<String> = listOfNotNull(phoneNumber.takeIf { it.isNotBlank() }),
     muted: Boolean = false,
 ): SyncConversation =
     SyncConversation(
         id = threadId.toString(),
-        participants = listOfNotNull(phoneNumber.takeIf { it.isNotBlank() }),
+        participants = participants,
         lastMessage = snippet,
         lastUpdatedAtEpochMillis = date.toLong() * 1000L,
         unreadCount = unreadCount,

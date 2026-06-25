@@ -20,6 +20,7 @@ object SyncJsonCodec {
             .put("cursor", batch.cursor)
             .put("generatedAtEpochMillis", batch.generatedAtEpochMillis)
             .put("messages", batch.messages.toJsonArray { it.toJson() })
+            .put("conversationIds", batch.conversationIds.toJsonArray())
             .put("deletedMessageIds", batch.deletedMessageIds.toJsonArray())
             .toString()
             .toByteArray(Charsets.UTF_8)
@@ -27,27 +28,34 @@ object SyncJsonCodec {
     fun decodeWatchMutation(bytes: ByteArray): WatchMutation? =
         runCatching {
             val json = JSONObject(bytes.toString(Charsets.UTF_8))
+            val schemaVersion = json.getInt("schemaVersion")
+            if (schemaVersion != SYNC_SCHEMA_VERSION) {
+                return null
+            }
             WatchMutation(
-                schemaVersion = json.optInt("schemaVersion", SYNC_SCHEMA_VERSION),
+                schemaVersion = schemaVersion,
                 clientMutationId = json.getString("clientMutationId"),
                 type = WatchMutationType.valueOf(json.getString("type")),
                 conversationId = json.getString("conversationId"),
                 messageBody = json.optString("messageBody").takeIf { it.isNotBlank() },
+                recipientAddresses = json.getJSONArray("recipientAddresses").toStringList(),
                 createdAtEpochMillis = json.getLong("createdAtEpochMillis"),
             )
         }.getOrNull()
 
-    fun decodeBootstrapRequest(bytes: ByteArray): BootstrapRequest {
-        if (bytes.isEmpty()) return BootstrapRequest()
-        return runCatching {
+    fun decodeBootstrapRequest(bytes: ByteArray): BootstrapRequest? =
+        runCatching {
             val json = JSONObject(bytes.toString(Charsets.UTF_8))
+            val schemaVersion = json.getInt("schemaVersion")
+            if (schemaVersion != SYNC_SCHEMA_VERSION) {
+                return null
+            }
             BootstrapRequest(
-                schemaVersion = json.optInt("schemaVersion", SYNC_SCHEMA_VERSION),
-                limit = json.optInt("limit", 25).coerceAtLeast(1),
-                offset = json.optInt("offset", 0).coerceAtLeast(0),
+                schemaVersion = schemaVersion,
+                limit = json.getInt("limit").coerceAtLeast(1),
+                offset = json.getInt("offset").coerceAtLeast(0),
             )
-        }.getOrElse { BootstrapRequest() }
-    }
+        }.getOrNull()
 
     fun encodeMutationAck(ack: MutationAck): ByteArray =
         JSONObject()
@@ -84,4 +92,9 @@ object SyncJsonCodec {
 
     private fun List<String>.toJsonArray(): JSONArray =
         JSONArray().also { array -> forEach { array.put(it) } }
+
+    private fun JSONArray.toStringList(): List<String> =
+        (0 until length()).mapNotNull { index ->
+            optString(index).takeIf { it.isNotBlank() }
+        }
 }

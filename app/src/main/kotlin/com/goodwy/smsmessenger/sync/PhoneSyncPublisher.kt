@@ -31,10 +31,11 @@ class PhoneSyncPublisher(
     fun publishMessages(
         nodeId: String,
         batch: MessageDeltaBatch,
+        chunkIndex: Int,
     ) {
         putPayload(
             nodeId = nodeId,
-            path = SyncPaths.MESSAGES,
+            path = "${SyncPaths.MESSAGE_CHUNKS}/${batch.cursor}/$chunkIndex",
             plainPayload = SyncJsonCodec.encodeMessageDeltaBatch(batch),
         )
     }

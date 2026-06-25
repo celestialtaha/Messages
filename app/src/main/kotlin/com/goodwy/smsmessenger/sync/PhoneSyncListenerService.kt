@@ -12,6 +12,7 @@ import com.google.android.gms.wearable.WearableListenerService
 import com.goodwy.smsmessenger.extensions.config
 import com.goodwy.smsmessenger.extensions.conversationsDB
 import com.goodwy.smsmessenger.extensions.getConversations
+import com.goodwy.smsmessenger.extensions.getAddresses
 import com.goodwy.smsmessenger.extensions.getMessages
 import com.goodwy.smsmessenger.extensions.markThreadMessagesRead
 import com.goodwy.smsmessenger.extensions.messagesDB
@@ -56,7 +57,11 @@ class PhoneSyncListenerService : WearableListenerService() {
             }
 
             SyncPaths.BOOTSTRAP_REQUEST -> {
-                val request = SyncJsonCodec.decodeBootstrapRequest(messageEvent.data)
+                val request =
+                    SyncJsonCodec.decodeBootstrapRequest(messageEvent.data) ?: run {
+                        Log.w(TAG, "Ignoring bad bootstrap request from ${messageEvent.sourceNodeId}")
+                        return
+                    }
                 pendingBootstrapRequests[messageEvent.sourceNodeId] = request
                 sendKeyExchangeResponse(messageEvent.sourceNodeId)
                 if (secureCodec.hasPeerKey(messageEvent.sourceNodeId)) {
@@ -140,6 +145,7 @@ class PhoneSyncListenerService : WearableListenerService() {
             )
         val conversations = snapshot.conversations
         val messages = snapshot.messages
+        val messagesByThread = messages.groupBy { message -> message.threadId }
 
         publisher.publishConversations(
             nodeId = nodeId,
@@ -149,19 +155,23 @@ class PhoneSyncListenerService : WearableListenerService() {
                 conversations =
                     conversations.map { conversation ->
                         conversation.toSyncConversation(
+                            participants =
+                                participantAddressesForConversation(
+                                    conversation = conversation,
+                                    threadMessages = messagesByThread[conversation.threadId].orEmpty(),
+                                ),
                             muted = mutedThreads.contains(conversation.threadId.toString()),
                         )
                     },
                 deletedConversationIds = snapshot.deletedConversationIds,
             )
         )
-        publisher.publishMessages(
+        publishMessageSnapshots(
             nodeId = nodeId,
-            batch = MessageDeltaBatch(
-                cursor = now,
-                generatedAtEpochMillis = now,
-                messages = messages.map { it.toSyncMessage() },
-            )
+            cursor = now,
+            generatedAtEpochMillis = now,
+            conversations = conversations,
+            messagesByThread = messagesByThread,
         )
         Log.d(
             TAG,
@@ -333,13 +343,12 @@ class PhoneSyncListenerService : WearableListenerService() {
 
     private fun handleMutation(mutation: WatchMutation): MutationAck =
         runCatching {
-            val threadId = mutation.conversationId.toLong()
             when (mutation.type) {
-                WatchMutationType.REPLY -> executeReply(threadId, mutation)
-                WatchMutationType.MARK_READ -> markThreadMessagesRead(threadId)
-                WatchMutationType.ARCHIVE -> updateConversationArchivedStatus(threadId, archived = true)
-                WatchMutationType.MUTE -> setThreadMuted(threadId, muted = true)
-                WatchMutationType.UNMUTE -> setThreadMuted(threadId, muted = false)
+                WatchMutationType.REPLY -> executeReply(mutation)
+                WatchMutationType.MARK_READ -> markThreadMessagesRead(mutation.requireThreadId())
+                WatchMutationType.ARCHIVE -> updateConversationArchivedStatus(mutation.requireThreadId(), archived = true)
+                WatchMutationType.MUTE -> setThreadMuted(mutation.requireThreadId(), muted = true)
+                WatchMutationType.UNMUTE -> setThreadMuted(mutation.requireThreadId(), muted = false)
             }
             MutationAck(
                 clientMutationId = mutation.clientMutationId,
@@ -356,20 +365,15 @@ class PhoneSyncListenerService : WearableListenerService() {
             )
         }
 
-    private fun executeReply(
-        threadId: Long,
-        mutation: WatchMutation,
-    ) {
+    private fun executeReply(mutation: WatchMutation) {
         val messageBody = mutation.messageBody?.trim().orEmpty()
         require(messageBody.isNotBlank()) { "empty_body" }
-        val conversation =
-            conversationsDB.getConversationWithThreadId(threadId)
-                ?: getConversations(threadId = threadId).firstOrNull()
-                ?: error("conversation_not_found")
         val addresses =
-            conversation.phoneNumber
-                .split(ADDRESS_SEPARATOR)
-                .mapNotNull { it.trim().takeIf(String::isNotBlank) }
+            mutation.conversationId.toLongOrNull()
+                ?.let { threadId ->
+                    recipientAddressesForThread(threadId)
+                }
+                ?: mutation.recipientAddresses.mapNotNull { it.trim().takeIf(String::isNotBlank) }
         require(addresses.isNotEmpty()) { "recipient_missing" }
         sendMessageCompat(
             text = messageBody,
@@ -378,6 +382,134 @@ class PhoneSyncListenerService : WearableListenerService() {
             attachments = emptyList(),
         )
     }
+
+    private fun publishMessageSnapshots(
+        nodeId: String,
+        cursor: Long,
+        generatedAtEpochMillis: Long,
+        conversations: List<Conversation>,
+        messagesByThread: Map<Long, List<Message>>,
+    ) {
+        var pendingConversationIds = mutableListOf<String>()
+        var pendingMessages = mutableListOf<Message>()
+        var chunkIndex = 0
+
+        fun flushPending() {
+            if (pendingConversationIds.isEmpty()) return
+            publisher.publishMessages(
+                nodeId = nodeId,
+                batch =
+                    MessageDeltaBatch(
+                        cursor = cursor,
+                        generatedAtEpochMillis = generatedAtEpochMillis,
+                        messages = pendingMessages.map { message -> message.toSyncMessage() },
+                        conversationIds = pendingConversationIds,
+                    ),
+                chunkIndex = chunkIndex,
+            )
+            chunkIndex += 1
+            pendingConversationIds = mutableListOf()
+            pendingMessages = mutableListOf()
+        }
+
+        conversations.forEach { conversation ->
+            val conversationId = conversation.threadId.toString()
+            val messagesForConversation =
+                trimMessagesToPayloadBudget(
+                    conversationId = conversationId,
+                    messages = messagesByThread[conversation.threadId].orEmpty(),
+                    cursor = cursor,
+                    generatedAtEpochMillis = generatedAtEpochMillis,
+                )
+            val candidateConversationIds = pendingConversationIds + conversationId
+            val candidateMessages = pendingMessages + messagesForConversation
+            val candidateBatch =
+                MessageDeltaBatch(
+                    cursor = cursor,
+                    generatedAtEpochMillis = generatedAtEpochMillis,
+                    messages = candidateMessages.map { message -> message.toSyncMessage() },
+                    conversationIds = candidateConversationIds,
+                )
+            if (
+                pendingConversationIds.isNotEmpty() &&
+                SyncJsonCodec.encodeMessageDeltaBatch(candidateBatch).size > MAX_DATA_ITEM_PAYLOAD_BYTES
+            ) {
+                flushPending()
+            }
+            pendingConversationIds.add(conversationId)
+            pendingMessages.addAll(messagesForConversation)
+        }
+
+        flushPending()
+    }
+
+    private fun trimMessagesToPayloadBudget(
+        conversationId: String,
+        messages: List<Message>,
+        cursor: Long,
+        generatedAtEpochMillis: Long,
+    ): List<Message> {
+        var candidate = messages
+        while (candidate.isNotEmpty()) {
+            val payloadSize =
+                SyncJsonCodec.encodeMessageDeltaBatch(
+                    MessageDeltaBatch(
+                        cursor = cursor,
+                        generatedAtEpochMillis = generatedAtEpochMillis,
+                        messages = candidate.map { message -> message.toSyncMessage() },
+                        conversationIds = listOf(conversationId),
+                    ),
+                ).size
+            if (payloadSize <= MAX_DATA_ITEM_PAYLOAD_BYTES) {
+                return candidate
+            }
+            candidate = candidate.drop(1)
+        }
+        return emptyList()
+    }
+
+    private fun recipientAddressesForThread(threadId: Long): List<String> {
+        val localMessages = messagesDB.getNonRecycledThreadMessages(threadId)
+        val messageAddresses =
+            localMessages
+                .asSequence()
+                .sortedByDescending { message -> message.date }
+                .flatMap { message -> message.participants.getAddresses().asSequence() }
+                .mapNotNull { address -> address.trim().takeIf(String::isNotBlank) }
+                .distinct()
+                .toList()
+        if (messageAddresses.isNotEmpty()) return messageAddresses
+
+        val conversation =
+            conversationsDB.getConversationWithThreadId(threadId)
+                ?: getConversations(threadId = threadId).firstOrNull()
+        return conversation
+            ?.phoneNumber
+            ?.split(ADDRESS_SEPARATOR)
+            ?.mapNotNull { address -> address.trim().takeIf(String::isNotBlank) }
+            .orEmpty()
+    }
+
+    private fun participantAddressesForConversation(
+        conversation: Conversation,
+        threadMessages: List<Message>,
+    ): List<String> {
+        val messageAddresses =
+            threadMessages
+                .asSequence()
+                .flatMap { message -> message.participants.getAddresses().asSequence() }
+        val conversationAddresses =
+            conversation.phoneNumber
+                .split(ADDRESS_SEPARATOR)
+                .asSequence()
+        return (messageAddresses + conversationAddresses)
+            .mapNotNull { address -> address.trim().takeIf(String::isNotBlank) }
+            .distinct()
+            .toList()
+    }
+
+    private fun WatchMutation.requireThreadId(): Long =
+        conversationId.toLongOrNull() ?: error("conversation_not_found")
 
     private fun setThreadMuted(
         threadId: Long,
@@ -453,6 +585,7 @@ class PhoneSyncListenerService : WearableListenerService() {
         private const val DEFAULT_BOOTSTRAP_LIMIT = 25
         private const val MAX_BOOTSTRAP_LIMIT = 300
         private const val MAX_MESSAGES_PER_CONVERSATION = 30
+        private const val MAX_DATA_ITEM_PAYLOAD_BYTES = 64_000
     }
 }
 
